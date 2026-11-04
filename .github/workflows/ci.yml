@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock
+            requirements-dev.txt
+
+      - run: pip install -r requirements.lock -r requirements-dev.txt
+
+      - run: python -m pytest
+
+  image:
+    # Builds the image and runs the test suite inside it: the only place the
+    # OCR tests run, and a check that the image itself (Python, Tesseract
+    # data, non-root user) works.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: pdf-service:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run tests inside the image
+        run: |
+          docker run --rm \
+            -v "$PWD/tests:/app/tests:ro" \
+            -v "$PWD/pyproject.toml:/app/pyproject.toml:ro" \
+            -v "$PWD/requirements-dev.txt:/tmp/requirements-dev.txt:ro" \
+            -v "$PWD/requirements.lock:/tmp/requirements.lock:ro" \
+            pdf-service:ci sh -c '
+              pip install -q --target /tmp/dev -r /tmp/requirements-dev.txt -c /tmp/requirements.lock &&
+              PYTHONPATH=/tmp/dev python -m pytest -p no:cacheprovider -rs'

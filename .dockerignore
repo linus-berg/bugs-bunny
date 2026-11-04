@@ -1,0 +1,4 @@
+*
+!app/
+!requirements.lock
+**/__pycache__

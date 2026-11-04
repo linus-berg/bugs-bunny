@@ -1,0 +1,6 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Worker processes are spawned and inherit sys.path, so they can import both
+# `app` and the test helpers in `tests.worker_tasks`.
+pythonpath = ["."]
+filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
