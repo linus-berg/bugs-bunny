@@ -1,3 +1,6 @@
 # Test tools only. Local setup: pip install -r requirements.lock -r requirements-dev.txt
 pytest==9.2.0
 httpx2==2.16.0
+# Generate realistic office documents in tests.
+python-docx==1.2.0
+python-pptx==1.0.2

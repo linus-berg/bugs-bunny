@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import io
 import zipfile
 
@@ -7,6 +8,7 @@ import pymupdf
 import pytest
 from fastapi.testclient import TestClient
 
+from app import office
 from app.config import Settings
 from app.main import create_app
 
@@ -97,6 +99,99 @@ def make_scanned_png(text: str = "SCANNED INVOICE 4711") -> bytes:
     return page.get_pixmap(dpi=200).tobytes("png")
 
 
+def make_docx(*, title: str = "Quarterly Memo", author: str = "Ada Lovelace") -> bytes:
+    import docx
+
+    document = docx.Document()
+    properties = document.core_properties
+    properties.title, properties.author = title, author
+    properties.created = datetime.datetime(2023, 5, 17, 9, 30)
+    document.add_heading("Quarterly Memo", 1)
+    document.add_paragraph("Revenue grew by twelve percent this quarter.")
+    table = document.add_table(rows=3, cols=2)
+    table.style = "Table Grid"
+    for r, row in enumerate([("Item", "Qty"), ("Apple", "3"), ("Pear", "5")]):
+        for c, value in enumerate(row):
+            table.cell(r, c).text = value
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def make_xlsx() -> bytes:
+    import openpyxl
+
+    workbook = openpyxl.Workbook()
+    orders = workbook.active
+    orders.title = "Orders"
+    orders.append(["Order", "Customer", "Region", "Total"])
+    for i in range(1, 41):
+        orders.append([f"SO-{1000 + i}", f"Customer number {i}", ["North", "South"][i % 2], i * 10.5])
+    summary = workbook.create_sheet("Summary")
+    summary.append(["Metric", "Value"])
+    summary.append(["Orders", 40])
+    workbook.properties.title, workbook.properties.creator = "Sales 2026", "Ada Lovelace"
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def make_pptx() -> bytes:
+    import pptx
+
+    presentation = pptx.Presentation()
+    for title, body in [("Roadmap 2027", "Launch the extraction service"), ("Risks", "Scanned documents")]:
+        slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+        slide.shapes.title.text = title
+        slide.placeholders[1].text = body
+    buffer = io.BytesIO()
+    presentation.save(buffer)
+    return buffer.getvalue()
+
+
+def make_odt(body_xml: str = "<text:p>Hello from OpenDocument.</text:p>", *, encrypted: bool = False) -> bytes:
+    """A minimal ODT; ``body_xml`` goes inside <office:text>."""
+    content = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+        'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" '
+        'xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" '
+        'xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" '
+        'xmlns:xlink="http://www.w3.org/1999/xlink" office:version="1.3">'
+        f"<office:body><office:text>{body_xml}</office:text></office:body></office:document-content>"
+    )
+    encryption = "<manifest:encryption-data/>" if encrypted else ""
+    manifest = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.3">'
+        '<manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.text"/>'
+        f'<manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml">{encryption}'
+        "</manifest:file-entry></manifest:manifest>"
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as odt:
+        odt.writestr("mimetype", "application/vnd.oasis.opendocument.text")  # must come first
+        odt.writestr("META-INF/manifest.xml", manifest)
+        odt.writestr("content.xml", content)
+    return buffer.getvalue()
+
+
+def encrypt_ooxml(data: bytes, password: str) -> bytes:
+    from msoffcrypto.format.ooxml import OOXMLFile
+
+    out = io.BytesIO()
+    OOXMLFile(io.BytesIO(data)).encrypt(password, out)
+    return out.getvalue()
+
+
+@pytest.fixture(scope="session")
+def libreoffice() -> office.LibreOffice:
+    binary = office.find_libreoffice()
+    if binary is None:
+        pytest.skip("LibreOffice is not installed")
+    return office.LibreOffice(binary, timeout=120)
+
+
 @pytest.fixture(scope="session")
 def settings() -> Settings:
     return Settings(
@@ -119,6 +214,12 @@ def client(settings):
 @pytest.fixture(scope="session")
 def ocr_available(client) -> bool:
     return client.get("/info").json()["ocr"]["available"]
+
+
+@pytest.fixture(scope="session")
+def office_available(client) -> None:
+    if "DOCX" not in client.get("/info").json()["office_formats"]:
+        pytest.skip("LibreOffice is not installed")
 
 
 @pytest.fixture

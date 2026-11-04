@@ -41,3 +41,16 @@ def unpicklable():
 
 def failing_init():
     raise RuntimeError("cannot start")
+
+
+def spawn_child_then_hang(pid_file):
+    """Start a long-running child the way office.LibreOffice does, then hang until killed."""
+    import subprocess
+
+    from app.office import LibreOffice
+
+    prefix = LibreOffice("unused", timeout=1)._prefix
+    child = subprocess.Popen([*prefix, "sleep", "300"])
+    with open(pid_file, "w") as f:
+        f.write(str(child.pid))
+    time.sleep(300)

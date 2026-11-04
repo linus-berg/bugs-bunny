@@ -23,6 +23,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from app import __version__, extraction
 from app.config import Settings
 from app.errors import ServiceError
+from app.ocr import ENGINE_PREFERENCE, select_engine
 from app.pages import PageRanges, parse_page_spec
 from app.pool import WorkerPool
 
@@ -57,7 +58,13 @@ class ExtractionParams(BaseModel):
         None,
         max_length=200,
         pattern=OCR_LANGUAGE_PATTERN,
-        description="Tesseract language(s) for OCR, e.g. `eng` or `eng+deu`. Default: the server's `OCR_LANGUAGE`.",
+        description="OCR language(s) as Tesseract codes, e.g. `eng` or `eng+deu`. Default: the server's `OCR_LANGUAGE`.",
+    )
+    ocr_engine: Literal["auto", "rapidocr", "tesseract"] | None = Field(
+        None,
+        description="`rapidocr` is much more robust on poor scans and reads Latin-script languages, Chinese "
+        "and Japanese. `tesseract` is faster on clean scans and reads any installed language. `auto` uses "
+        "RapidOCR when it supports the language, else Tesseract. Default: the server's `OCR_ENGINE`.",
     )
     tables: Literal["markdown", "html"] = Field(
         "markdown",
@@ -104,7 +111,10 @@ class ChunkParams(ExtractionParams):
 
 DocumentFile = Annotated[
     UploadFile,
-    File(description="A PDF. XPS, EPUB, MOBI, FB2, CBZ, SVG and images (PNG, JPEG, TIFF, ...) work too; images are OCRed."),
+    File(
+        description="A PDF, an office document (DOCX, XLSX, PPTX, ODT, ODS, ODP, DOC, XLS, PPT, RTF), "
+        "an image (PNG, JPEG, TIFF, ...; OCRed), or XPS, EPUB, MOBI, FB2, CBZ, SVG."
+    ),
 ]
 Password = Annotated[
     str | None,
@@ -179,9 +189,15 @@ class ChunksResponse(BaseModel):
     chunks: list[Chunk]
 
 
+class OcrEngine(BaseModel):
+    languages: list[str]
+
+
 class OcrInfo(BaseModel):
     available: bool
-    languages: list[str] | None = Field(description="Installed Tesseract languages; null if the engine does not say.")
+    engines: dict[str, OcrEngine] = Field(description="Installed engines and the languages each can read.")
+    languages: list[str] = Field(description="Every language some installed engine can read.")
+    default_engine: str
     default_language: str
 
 
@@ -196,6 +212,7 @@ class ServiceInfo(BaseModel):
     workers: int
     limits: Limits
     ocr: OcrInfo
+    office_formats: list[str] = Field(description="Office formats this server accepts.")
     libraries: dict[str, str]
 
 
@@ -315,9 +332,12 @@ async def info(request: Request) -> dict[str, Any]:
         },
         "ocr": {
             "available": capabilities.get("ocr_available", False),
-            "languages": capabilities.get("ocr_languages"),
+            "engines": capabilities.get("ocr_engines", {}),
+            "languages": sorted({lang for e in capabilities.get("ocr_engines", {}).values() for lang in e["languages"]}),
+            "default_engine": settings.ocr_engine,
             "default_language": settings.ocr_language,
         },
+        "office_formats": capabilities.get("office_formats", []),
         "libraries": capabilities.get("versions", {}),
     }
 
@@ -347,31 +367,17 @@ def _text_options(request: Request, params: TextParams, *, per_page: bool) -> di
 
 
 def _ocr_options(request: Request, params: ExtractionParams) -> dict[str, Any]:
-    """Validate OCR options against what the workers support, before any work is done."""
+    """Pick the OCR engine for the request before any work is done, rejecting impossible combinations."""
     settings: Settings = request.app.state.settings
     capabilities = request.app.state.pool.capabilities
     language = params.ocr_language or settings.ocr_language
-    available = capabilities.get("ocr_available", False)
-
-    if params.ocr == "force" and not available:
-        raise ServiceError(422, "ocr_unavailable", "OCR was requested but no OCR engine is installed on this server.")
-    if params.ocr != "off" and available:
-        missing = _missing_languages(language, capabilities.get("ocr_languages"))
-        if missing:
-            installed = ", ".join(capabilities["ocr_languages"]) or "none"
-            raise ServiceError(
-                422,
-                "unsupported_ocr_language",
-                f"OCR language(s) not installed: {', '.join(missing)}. Installed: {installed}.",
-            )
-    return {"ocr": params.ocr, "ocr_language": language}
-
-
-def _missing_languages(language: str, installed: Iterable[str] | None) -> list[str]:
-    if installed is None:  # the engine doesn't report languages; let it decide
-        return []
-    installed = set(installed)
-    return [lang for lang in language.split("+") if lang not in installed]
+    off = {"ocr": "off", "ocr_engine": None, "ocr_language": language}
+    if params.ocr == "off":
+        return off
+    if not capabilities.get("ocr_engines") and params.ocr == "auto" and params.ocr_engine is None:
+        return off  # nothing installed and nothing explicitly asked for: plain text extraction
+    engine = select_engine(params.ocr_engine or settings.ocr_engine, language, capabilities)
+    return {"ocr": params.ocr, "ocr_engine": engine, "ocr_language": language}
 
 
 async def _process(request: Request, file: UploadFile, fn: Callable, password: str | None, **options: Any) -> Any:
@@ -535,8 +541,9 @@ Extract text from PDFs (and other documents) for search indexing, LLMs and RAG p
 * **`/chunks`** splits the document into retrieval-ready chunks with page and section references.
 * **`/metadata`** reads metadata, outline and form fields without extracting text.
 
-Scanned pages are OCRed automatically when an OCR engine is installed. Encrypted
-PDFs are supported via the `password` form field. Errors are JSON objects with a
+Besides PDFs, office documents (Word, Excel, PowerPoint, OpenDocument, RTF),
+images and e-book formats are accepted. Scanned pages are OCRed automatically.
+Encrypted PDFs and Microsoft Office files are supported via the `password` form field. Errors are JSON objects with a
 human-readable `detail` and a stable `code`.
 """
 
@@ -550,13 +557,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         pool = WorkerPool(
             settings.workers,
             initializer=extraction.initialize,
-            init_kwargs={"onnx_threads": settings.onnx_threads},
+            init_kwargs={"onnx_threads": settings.onnx_threads, "office_timeout": settings.processing_timeout},
             max_tasks_per_worker=settings.max_tasks_per_worker,
             max_queue=settings.max_queue,
         )
         await pool.start()
         try:
-            _check_default_language(settings, pool.capabilities)
+            _check_capabilities(settings, pool.capabilities)
             app.state.pool = pool
             yield
         finally:
@@ -583,16 +590,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
-def _check_default_language(settings: Settings, capabilities: dict[str, Any]) -> None:
-    if not capabilities.get("ocr_available"):
+def _check_capabilities(settings: Settings, capabilities: dict[str, Any]) -> None:
+    """Fail fast on an unusable OCR configuration; warn about missing optional features."""
+    if "DOCX" not in capabilities.get("office_formats", []):
+        log.warning("LibreOffice not found; office documents other than XLSX are not supported.")
+    engines = capabilities.get("ocr_engines", {})
+    if not engines:
         log.warning("No OCR engine found; scanned pages and images will yield no text.")
         return
-    missing = _missing_languages(settings.ocr_language, capabilities.get("ocr_languages"))
-    if missing:
+    log.info("OCR engines: %s", ", ".join(e for e in ENGINE_PREFERENCE if e in engines))
+    try:
+        select_engine(settings.ocr_engine, settings.ocr_language, capabilities)
+    except ServiceError as e:
         raise RuntimeError(
-            f"OCR_LANGUAGE={settings.ocr_language!r} is not installed (missing: {', '.join(missing)}). "
-            f"Installed: {', '.join(capabilities.get('ocr_languages') or []) or 'none'}."
-        )
+            f"OCR_ENGINE={settings.ocr_engine!r} with OCR_LANGUAGE={settings.ocr_language!r} cannot work: {e.detail}"
+        ) from None
 
 
 app = create_app()

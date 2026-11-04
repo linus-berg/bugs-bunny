@@ -287,7 +287,7 @@ def test_info(client, settings):
         "max_pages": settings.max_pages,
         "processing_timeout_seconds": settings.processing_timeout,
     }
-    assert set(body["libraries"]) == {"pymupdf", "pymupdf4llm"}
+    assert {"pymupdf", "pymupdf4llm"} <= set(body["libraries"])
 
 
 def test_openapi_documents_the_endpoints(client):
@@ -327,3 +327,14 @@ def test_auth_is_disabled_without_keys():
     app = Starlette(routes=[Route("/info", lambda request: PlainTextResponse("open"))])
     with TestClient(APIKeyMiddleware(app, keys=())) as open_client:
         assert open_client.get("/info").text == "open"
+
+
+def test_misconfigured_ocr_fails_at_startup():
+    from app.config import Settings
+    from app.main import create_app
+
+    # Russian with RapidOCR only can never work; refuse to start rather than fail every request.
+    app = create_app(Settings(workers=1, ocr_engine="rapidocr", ocr_language="rus"))
+    with pytest.raises(RuntimeError, match="cannot work"):
+        with TestClient(app):
+            pass

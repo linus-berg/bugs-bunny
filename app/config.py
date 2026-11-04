@@ -56,13 +56,16 @@ class Settings:
     """Restart a worker after this many documents to bound memory growth. 0 disables recycling."""
 
     onnx_threads: int = 1
-    """Intra-op threads for the layout model in each worker. 0 keeps the ONNX Runtime default."""
+    """Intra-op threads per worker for the ONNX models (layout analysis, RapidOCR). 0 keeps the ONNX Runtime default."""
 
     api_keys: tuple[str, ...] = ()
     """Accepted API keys. Empty means authentication is disabled."""
 
     ocr_language: str = "eng"
-    """Default Tesseract language(s), e.g. ``eng`` or ``eng+deu``."""
+    """Default OCR language(s), as Tesseract codes: ``eng``, ``eng+deu``, ..."""
+
+    ocr_engine: str = "auto"
+    """Default OCR engine: ``auto`` (RapidOCR where it supports the language, else Tesseract), ``rapidocr`` or ``tesseract``."""
 
     def __post_init__(self) -> None:
         checks = {
@@ -74,6 +77,7 @@ class Settings:
             "max_tasks_per_worker": self.max_tasks_per_worker >= 0,
             "onnx_threads": self.onnx_threads >= 0,
             "ocr_language": re.fullmatch(r"[A-Za-z0-9_]+(\+[A-Za-z0-9_]+)*", self.ocr_language) is not None,
+            "ocr_engine": self.ocr_engine in ("auto", "rapidocr", "tesseract"),
         }
         invalid = [name for name, ok in checks.items() if not ok]
         if invalid:
@@ -107,5 +111,6 @@ class Settings:
             **get("ONNX_THREADS", int, "onnx_threads"),
             **get("API_KEYS", keys, "api_keys"),
             **get("OCR_LANGUAGE", str, "ocr_language"),
+            **get("OCR_ENGINE", str, "ocr_engine"),
         }
         return cls(**values)

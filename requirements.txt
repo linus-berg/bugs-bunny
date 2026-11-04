@@ -6,3 +6,8 @@ python-multipart==0.0.33
 # a few pymupdf4llm internals (see app/extraction.py), so upgrade deliberately
 # and run the tests.
 pymupdf4llm==2.1
+# OCR engine used for most scans; far more robust than Tesseract on poor input.
+rapidocr==3.10.0
+# Office documents: spreadsheets are read directly, encrypted files decrypted.
+openpyxl==3.1.5
+msoffcrypto-tool==6.1.0
